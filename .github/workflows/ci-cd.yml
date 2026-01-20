@@ -1,0 +1,108 @@
+name: CI/CD - Poupe.AI Ingestion Service
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+env:
+  IMAGE_NAME: franciscopaulinoq/poupeai-ingestion-service
+  INFRA_DIR: /home/deploy/poupeai-infra
+  COMPOSE_SERVICE_NAME: ingestion-service
+
+jobs:
+  build-and-test:
+    name: Build, Test & Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build, Testes e Verificação
+        id: maven-build
+
+        run: mvn clean verify
+
+      - name: Publicar Resumo de Cobertura no PR
+        if: github.event_name == 'pull_request'
+        uses: Madrapps/jacoco-report@v1.7.1
+        with:
+
+          paths: |
+            ${{ github.workspace }}/**/target/site/jacoco/jacoco.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          min-coverage-overall: 80
+          min-coverage-changed-files: 80
+          title: "Relatório de Cobertura de Testes (Ingestion)"
+          update-comment: true
+
+  push_to_dockerhub:
+    name: Push Image to Docker Hub
+    needs: build-and-test
+
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build e Push da imagem
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  deploy:
+    name: Deploy to VPS (Hostinger)
+    needs: push_to_dockerhub
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Executar Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            
+            echo "--- Login no Docker Hub ---"
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+            echo "--- Atualizando Infra ---"
+            cd ${{ env.INFRA_DIR }}
+            
+            # Puxa a nova imagem do Docker Hub
+            docker compose -f docker-compose-production.yml pull ${{ env.COMPOSE_SERVICE_NAME }}
+
+            # Recria o container do ingestion-service com a nova imagem
+            docker compose -f docker-compose-production.yml up -d --force-recreate --no-deps ${{ env.COMPOSE_SERVICE_NAME }}
+
+            # Limpeza de imagens antigas
+            docker image prune -f
+            
+            echo "--- Deploy finalizado com sucesso! ---"
