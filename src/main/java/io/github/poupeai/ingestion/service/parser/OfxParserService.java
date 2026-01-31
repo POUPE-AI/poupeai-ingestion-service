@@ -46,7 +46,6 @@ public class OfxParserService {
         }
 
         String content = contentBuilder.toString();
-
         String bankCode = extractTagValue(BANK_ID_PATTERN, content);
         if (bankCode == null) bankCode = "UNKNOWN";
 
@@ -69,17 +68,17 @@ public class OfxParserService {
                 String type = extractTagValue(TRNTYPE_PATTERN, block);
                 String fitId = extractTagValue(FITID_PATTERN, block);
 
-                String description = extractTagValue(MEMO_PATTERN, block);
-                if (description == null || description.isBlank()) {
-                    description = extractTagValue(NAME_PATTERN, block);
-                }
+                String name = extractTagValue(NAME_PATTERN, block);
+                String memo = extractTagValue(MEMO_PATTERN, block);
+
+                String finalDescription = buildDescription(name, memo);
 
                 transactions.add(BankTransaction.builder()
                         .bankCode(bankCode)
                         .fitId(fitId != null ? fitId.trim() : null)
                         .type(type)
                         .amount(amount)
-                        .description(description != null ? description.trim() : "Sem descrição")
+                        .description(finalDescription)
                         .date(LocalDateTime.parse(dateStr, OFX_DATE_FMT))
                         .build());
 
@@ -97,5 +96,22 @@ public class OfxParserService {
             return m.group(1).trim();
         }
         return null;
+    }
+
+    private String buildDescription(String name, String memo) {
+        if (name == null) name = "";
+        if (memo == null) memo = "";
+
+        name = name.trim();
+        memo = memo.trim();
+
+        if (name.isEmpty()) return memo.isEmpty() ? "Sem descrição" : memo;
+        if (memo.isEmpty()) return name;
+
+        if (name.equalsIgnoreCase(memo)) return name;
+
+        if (memo.toLowerCase().contains(name.toLowerCase())) return memo;
+
+        return name + " - " + memo;
     }
 }
