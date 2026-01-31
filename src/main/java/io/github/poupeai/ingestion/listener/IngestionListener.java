@@ -1,13 +1,21 @@
 package io.github.poupeai.ingestion.listener;
 
 import io.github.poupeai.ingestion.domain.event.IngestionEvent;
+import io.github.poupeai.ingestion.service.StorageService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
+import java.io.InputStream;
+
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class IngestionListener {
+
+    private final StorageService storageService;
+
     @RabbitListener(queues = "${app.rabbitmq.queue.ingestion}")
     public void handleIngestionEvent(IngestionEvent event) {
         log.info("Recebendo evento de ingestão. ID: {}, Type: {}", event.messageId(), event.eventType());
@@ -17,13 +25,15 @@ public class IngestionListener {
             return;
         }
 
-        log.info("Iniciando processamento do Job ID: {} para o arquivo: {}",
-                event.payload().jobId(), event.payload().fileKey());
+        String fileKey = event.payload().fileKey();
+        log.info("Tentando processar arquivo: {}", fileKey);
 
-        processIngestion(event);
-    }
+        try (InputStream inputStream = storageService.downloadFile(fileKey)) {
+            log.info("SUCESSO! Arquivo acessado. Bytes disponíveis estimados: {}", inputStream.available());
 
-    private void processIngestion(IngestionEvent event) {
-        log.info("Simulando processamento do arquivo...");
+
+        } catch (Exception e) {
+            log.error("Erro ao processar ingestão", e);
+        }
     }
 }
