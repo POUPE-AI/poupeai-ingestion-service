@@ -15,4 +15,5 @@ public class BankTransaction {
     private BigDecimal amount;
     private String description;
     private String type;
+    private String categoryId;
 }
