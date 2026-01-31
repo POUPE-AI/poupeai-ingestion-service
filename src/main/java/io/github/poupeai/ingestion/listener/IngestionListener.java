@@ -74,17 +74,21 @@ public class IngestionListener {
     }
 
     private void applyCategorization(List<BankTransaction> transactions, List<CategoryDTO> userCategories) {
-        log.info("Passo 3: Solicitando predição de categorias para IA...");
+        log.info("Passo 3: Solicitando predição de categorias para IA (Timeout 60s)...");
         try {
             List<String> descriptions = transactions.stream()
                     .map(BankTransaction::getDescription)
+                    .distinct()
                     .toList();
 
             CategorizationRequest request = new CategorizationRequest(descriptions, userCategories);
             CategorizationResponse response = reportServiceClient.predictCategories(request);
 
-            if (response != null && response.categorizations() != null) {
-                Map<String, String> predictedMap = response.categorizations().stream()
+            List<CategorizationResponse.CategorizationItem> items = response != null ? response.getCategorizationsSafe() : Collections.emptyList();
+
+            if (!items.isEmpty()) {
+                Map<String, String> predictedMap = items.stream()
+                        .filter(item -> item.categoryId() != null)
                         .collect(Collectors.toMap(
                                 CategorizationResponse.CategorizationItem::description,
                                 CategorizationResponse.CategorizationItem::categoryId,
@@ -93,17 +97,19 @@ public class IngestionListener {
 
                 int matches = 0;
                 for (BankTransaction tx : transactions) {
-                    String predictedCatId = predictedMap.get(tx.getDescription());
-                    if (predictedCatId != null) {
-                        tx.setCategoryId(predictedCatId);
+                    String catId = predictedMap.get(tx.getDescription());
+                    if (catId != null) {
+                        tx.setCategoryId(catId);
                         matches++;
                     }
                 }
                 log.info("IA Categorizou {} de {} transações.", matches, transactions.size());
+            } else {
+                log.warn("IA retornou resposta válida, mas lista de categorizações veio vazia.");
             }
 
         } catch (Exception e) {
-            log.error("Erro ao chamar serviço de categorização (IA)", e);
+            log.error("Erro na integração com IA (Report Service): {}", e.getMessage());
         }
     }
 }
