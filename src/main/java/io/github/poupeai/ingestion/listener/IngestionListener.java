@@ -1,6 +1,9 @@
 package io.github.poupeai.ingestion.listener;
 
 import io.github.poupeai.ingestion.client.CoreServiceClient;
+import io.github.poupeai.ingestion.client.ReportServiceClient;
+import io.github.poupeai.ingestion.client.dto.CategorizationRequest;
+import io.github.poupeai.ingestion.client.dto.CategorizationResponse;
 import io.github.poupeai.ingestion.domain.event.IngestionEvent;
 import io.github.poupeai.ingestion.domain.model.BankTransaction;
 import io.github.poupeai.ingestion.dto.CategoryDTO;
@@ -12,7 +15,10 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Component
@@ -22,6 +28,7 @@ public class IngestionListener {
     private final StorageService storageService;
     private final OfxParserService ofxParserService;
     private final CoreServiceClient coreServiceClient;
+    private final ReportServiceClient reportServiceClient;
 
     @RabbitListener(queues = "${app.rabbitmq.queue.ingestion}")
     public void handleIngestionEvent(IngestionEvent event) {
@@ -40,23 +47,63 @@ public class IngestionListener {
         try (InputStream inputStream = storageService.downloadFile(fileKey)) {
 
             List<BankTransaction> transactions = ofxParserService.parse(inputStream);
-            log.info("OFX Parseado: {} transações encontradas.", transactions.size());
+            log.info("Passo 1: OFX Parseado. {} transações.", transactions.size());
 
-            log.info("Buscando categorias do usuário no Core Service...");
+            List<CategoryDTO> userCategories = Collections.emptyList();
             try {
-                List<CategoryDTO> categories = coreServiceClient.getCategories(profileId);
-
-                log.info("SUCESSO! Categorias recuperadas: {}", categories.size());
-                categories.forEach(c -> log.info(" - Categoria: {} ({})", c.name(), c.id()));
-
-                // TODO: Na próxima issue, enviaremos (Transações + Categorias) para a IA
-
+                userCategories = coreServiceClient.getCategories(profileId);
+                log.info("Passo 2: Categorias recuperadas: {}", userCategories.size());
             } catch (Exception e) {
-                log.error("Erro ao buscar categorias no Core Service. Verifique se o serviço está UP e a API Key está correta.", e);
+                log.error("Falha ao buscar categorias. A categorização IA será prejudicada.", e);
             }
+
+            if (!userCategories.isEmpty() && !transactions.isEmpty()) {
+                applyCategorization(transactions, userCategories);
+            } else {
+                log.warn("Pulando etapa de IA (Categorias ou Transações vazias).");
+            }
+
+            transactions.forEach(t -> log.info("TX: {} | Valor: {} | CatID: {} | Desc: {}",
+                    t.getDate().toLocalDate(), t.getAmount(), t.getCategoryId(), t.getDescription()));
+
+            // TODO: Próxima issue -> Persistir (POST /transactions) no Core
 
         } catch (Exception e) {
             log.error("Erro ao processar ingestão", e);
+        }
+    }
+
+    private void applyCategorization(List<BankTransaction> transactions, List<CategoryDTO> userCategories) {
+        log.info("Passo 3: Solicitando predição de categorias para IA...");
+        try {
+            List<String> descriptions = transactions.stream()
+                    .map(BankTransaction::getDescription)
+                    .toList();
+
+            CategorizationRequest request = new CategorizationRequest(descriptions, userCategories);
+            CategorizationResponse response = reportServiceClient.predictCategories(request);
+
+            if (response != null && response.categorizations() != null) {
+                Map<String, String> predictedMap = response.categorizations().stream()
+                        .collect(Collectors.toMap(
+                                CategorizationResponse.CategorizationItem::description,
+                                CategorizationResponse.CategorizationItem::categoryId,
+                                (existing, replacement) -> existing
+                        ));
+
+                int matches = 0;
+                for (BankTransaction tx : transactions) {
+                    String predictedCatId = predictedMap.get(tx.getDescription());
+                    if (predictedCatId != null) {
+                        tx.setCategoryId(predictedCatId);
+                        matches++;
+                    }
+                }
+                log.info("IA Categorizou {} de {} transações.", matches, transactions.size());
+            }
+
+        } catch (Exception e) {
+            log.error("Erro ao chamar serviço de categorização (IA)", e);
         }
     }
 }
