@@ -30,6 +30,9 @@ public class RabbitMQConfig {
     @Value("${app.rabbitmq.routing-key}")
     private String routingKey;
 
+    @Value("${app.rabbitmq.notifications.exchange}")
+    private String notificationExchangeName;
+
     @Bean
     @Primary
     public ObjectMapper objectMapper() {
@@ -56,6 +59,11 @@ public class RabbitMQConfig {
         return BindingBuilder.bind(ingestionQueue)
                 .to(ingestionExchange)
                 .with(routingKey);
+    }
+
+    @Bean
+    public TopicExchange notificationExchange() {
+        return new TopicExchange(notificationExchangeName);
     }
 
     @Bean
