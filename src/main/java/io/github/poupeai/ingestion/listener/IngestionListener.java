@@ -46,18 +46,16 @@ public class IngestionListener {
         String fileKey = event.payload().fileKey();
         String profileId = event.payload().profileId();
         String bankAccountId = event.payload().bankAccountId();
+        String fallbackCategoryId = event.payload().fallbackCategoryId();
 
-        log.info("Iniciando processamento. Arquivo: {} | Profile: {}", fileKey, profileId);
+        log.info("Iniciando processamento. Arquivo: {} | Fallback Category: {}", fileKey, fallbackCategoryId);
 
         try (InputStream inputStream = storageService.downloadFile(fileKey)) {
 
             List<BankTransaction> transactions = ofxParserService.parse(inputStream);
             log.info("Passo 1: OFX Parseado. {} transações encontradas.", transactions.size());
 
-            if (transactions.isEmpty()) {
-                log.warn("Nenhuma transação válida encontrada no arquivo.");
-                return;
-            }
+            if (transactions.isEmpty()) return;
 
             List<CategoryDTO> userCategories = fetchCategoriesSafely(profileId);
 
@@ -65,8 +63,7 @@ public class IngestionListener {
                 applyCategorization(transactions, userCategories);
             }
 
-            log.info("Passo 4: Enviando {} transações para persistência no Core...", transactions.size());
-            persistTransactionsBatch(transactions, profileId, bankAccountId);
+            persistTransactionsBatch(transactions, profileId, bankAccountId, fallbackCategoryId);
 
         } catch (Exception e) {
             log.error("Erro fatal ao processar ingestão", e);
@@ -77,7 +74,7 @@ public class IngestionListener {
         try {
             return coreServiceClient.getCategories(profileId);
         } catch (Exception e) {
-            log.error("Falha não-bloqueante ao buscar categorias: {}", e.getMessage());
+            log.error("Falha ao buscar categorias: {}", e.getMessage());
             return Collections.emptyList();
         }
     }
@@ -115,31 +112,30 @@ public class IngestionListener {
                 log.info("IA Categorizou {} de {} transações.", matches, transactions.size());
             }
         } catch (Exception e) {
-            log.error("Erro na integração com IA (Report Service): {}", e.getMessage());
+            log.error("Erro na integração com IA: {}", e.getMessage());
         }
     }
 
-    private void persistTransactionsBatch(List<BankTransaction> transactions, String profileId, String bankAccountId) {
+    private void persistTransactionsBatch(List<BankTransaction> transactions, String profileId, String bankAccountId, String fallbackCategoryId) {
         List<CreateTransactionRequest> dtos = transactions.stream()
-                .map(tx -> toCreateRequest(tx, profileId, bankAccountId))
+                .map(tx -> toCreateRequest(tx, profileId, bankAccountId, fallbackCategoryId))
                 .toList();
 
         try {
             coreServiceClient.createTransactionsBatch(dtos);
-            log.info("SUCESSO FINAL! Transações salvas no Core Service.");
+            log.info("SUCESSO FINAL! {} transações enviadas ao Core.", dtos.size());
         } catch (Exception e) {
-            log.error("Erro ao salvar transações no Core Service.", e);
+            log.error("Erro ao salvar no Core Service.", e);
             throw e;
         }
     }
 
-    private CreateTransactionRequest toCreateRequest(BankTransaction tx, String profileId, String bankAccountId) {
+    private CreateTransactionRequest toCreateRequest(BankTransaction tx, String profileId, String bankAccountId, String fallbackCategoryId) {
         boolean isExpense = tx.getAmount().compareTo(BigDecimal.ZERO) < 0;
         TransactionType type = isExpense ? TransactionType.EXPENSE : TransactionType.INCOME;
-
         BigDecimal amountAbs = tx.getAmount().abs();
 
-        UUID categoryId = tx.getCategoryId() != null ? UUID.fromString(tx.getCategoryId()) : null;
+        String finalCategoryId = tx.getCategoryId() != null ? tx.getCategoryId() : fallbackCategoryId;
 
         return new CreateTransactionRequest(
                 UUID.fromString(profileId),
@@ -148,7 +144,7 @@ public class IngestionListener {
                 amountAbs,
                 type,
                 tx.getDate().toLocalDate(),
-                categoryId,
+                finalCategoryId != null ? UUID.fromString(finalCategoryId) : null,
                 tx.getFitId()
         );
     }
