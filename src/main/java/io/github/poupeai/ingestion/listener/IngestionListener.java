@@ -54,7 +54,13 @@ public class IngestionListener {
         log.info("Iniciando processamento. Arquivo: {}", fileKey);
 
         try {
-            updateJobStatus(jobId, "PROCESSING", "Iniciando download e leitura do arquivo...", null);
+            String initialSummary = """
+                {
+                    "message": "Iniciando download e leitura do arquivo...",
+                    "step": "START"
+                }
+                """;
+            updateJobStatus(jobId, "PROCESSING", initialSummary, null);
 
             try (InputStream inputStream = storageService.downloadFile(fileKey)) {
 
@@ -62,7 +68,13 @@ public class IngestionListener {
                 log.info("Passo 1: OFX Parseado. {} transações encontradas.", transactions.size());
 
                 if (transactions.isEmpty()) {
-                    updateJobStatus(jobId, "COMPLETED", "Arquivo processado, mas nenhuma transação válida encontrada.", null);
+                    String emptySummary = """
+                        {
+                            "message": "Arquivo processado, mas nenhuma transação válida encontrada.",
+                            "total_transactions": 0
+                        }
+                        """;
+                    updateJobStatus(jobId, "COMPLETED", emptySummary, null);
                     return;
                 }
 
@@ -76,11 +88,15 @@ public class IngestionListener {
                 log.info("Passo 4: Enviando {} transações para persistência...", transactions.size());
                 persistTransactionsBatch(transactions, profileId, bankAccountId, fallbackIncomeId, fallbackExpenseId);
 
-                String summary = String.format(
-                        "Processamento concluído. %d transações importadas (%d categorizadas por IA).",
-                        transactions.size(), categorizedByAi
-                );
-                updateJobStatus(jobId, "COMPLETED", summary, null);
+                String summaryJson = String.format("""
+                        {
+                            "message": "Processamento concluído com sucesso.",
+                            "total_transactions": %d,
+                            "ai_categorized": %d
+                        }
+                        """, transactions.size(), categorizedByAi);
+
+                updateJobStatus(jobId, "COMPLETED", summaryJson, null);
                 log.info("Job {} finalizado com sucesso.", jobId);
             }
 
