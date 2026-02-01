@@ -6,6 +6,7 @@ import io.github.poupeai.ingestion.client.dto.CategorizationRequest;
 import io.github.poupeai.ingestion.client.dto.CategorizationResponse;
 import io.github.poupeai.ingestion.client.dto.CreateTransactionRequest;
 import io.github.poupeai.ingestion.client.dto.TransactionType;
+import io.github.poupeai.ingestion.client.dto.UpdateIngestionJobRequest;
 import io.github.poupeai.ingestion.domain.event.IngestionEvent;
 import io.github.poupeai.ingestion.domain.model.BankTransaction;
 import io.github.poupeai.ingestion.dto.CategoryDTO;
@@ -43,30 +44,62 @@ public class IngestionListener {
             return;
         }
 
+        String jobId = event.payload().jobId();
         String fileKey = event.payload().fileKey();
         String profileId = event.payload().profileId();
         String bankAccountId = event.payload().bankAccountId();
-        String fallbackCategoryId = event.payload().fallbackCategoryId();
+        String fallbackIncomeId = event.payload().fallbackIncomeCategoryId();
+        String fallbackExpenseId = event.payload().fallbackExpenseCategoryId();
 
-        log.info("Iniciando processamento. Arquivo: {} | Fallback Category: {}", fileKey, fallbackCategoryId);
+        log.info("Iniciando processamento. Arquivo: {}", fileKey);
 
-        try (InputStream inputStream = storageService.downloadFile(fileKey)) {
+        try {
+            updateJobStatus(jobId, "PROCESSING", "Iniciando download e leitura do arquivo...", null);
 
-            List<BankTransaction> transactions = ofxParserService.parse(inputStream);
-            log.info("Passo 1: OFX Parseado. {} transações encontradas.", transactions.size());
+            try (InputStream inputStream = storageService.downloadFile(fileKey)) {
 
-            if (transactions.isEmpty()) return;
+                List<BankTransaction> transactions = ofxParserService.parse(inputStream);
+                log.info("Passo 1: OFX Parseado. {} transações encontradas.", transactions.size());
 
-            List<CategoryDTO> userCategories = fetchCategoriesSafely(profileId);
+                if (transactions.isEmpty()) {
+                    updateJobStatus(jobId, "COMPLETED", "Arquivo processado, mas nenhuma transação válida encontrada.", null);
+                    return;
+                }
 
-            if (!userCategories.isEmpty()) {
-                applyCategorization(transactions, userCategories);
+                List<CategoryDTO> userCategories = fetchCategoriesSafely(profileId);
+
+                int categorizedByAi = 0;
+                if (!userCategories.isEmpty()) {
+                    categorizedByAi = applyCategorization(transactions, userCategories);
+                }
+
+                log.info("Passo 4: Enviando {} transações para persistência...", transactions.size());
+                persistTransactionsBatch(transactions, profileId, bankAccountId, fallbackIncomeId, fallbackExpenseId);
+
+                String summary = String.format(
+                        "Processamento concluído. %d transações importadas (%d categorizadas por IA).",
+                        transactions.size(), categorizedByAi
+                );
+                updateJobStatus(jobId, "COMPLETED", summary, null);
+                log.info("Job {} finalizado com sucesso.", jobId);
             }
 
-            persistTransactionsBatch(transactions, profileId, bankAccountId, fallbackCategoryId);
-
         } catch (Exception e) {
-            log.error("Erro fatal ao processar ingestão", e);
+            log.error("Erro fatal ao processar Job {}", jobId, e);
+            updateJobStatus(jobId, "FAILED", null, "Erro interno: " + e.getMessage());
+        }
+    }
+
+    private void updateJobStatus(String jobId, String status, String summary, String error) {
+        try {
+            if (jobId == null) return;
+            coreServiceClient.updateStatus(jobId, UpdateIngestionJobRequest.builder()
+                    .status(status)
+                    .summary(summary)
+                    .errorDetails(error)
+                    .build());
+        } catch (Exception e) {
+            log.error("Falha ao atualizar status do job {}", jobId, e);
         }
     }
 
@@ -74,13 +107,14 @@ public class IngestionListener {
         try {
             return coreServiceClient.getCategories(profileId);
         } catch (Exception e) {
-            log.error("Falha ao buscar categorias: {}", e.getMessage());
+            log.error("Falha não-bloqueante ao buscar categorias: {}", e.getMessage());
             return Collections.emptyList();
         }
     }
 
-    private void applyCategorization(List<BankTransaction> transactions, List<CategoryDTO> userCategories) {
+    private int applyCategorization(List<BankTransaction> transactions, List<CategoryDTO> userCategories) {
         log.info("Passo 3: Solicitando predição de categorias para IA...");
+        int matches = 0;
         try {
             List<String> descriptions = transactions.stream()
                     .map(BankTransaction::getDescription)
@@ -101,7 +135,6 @@ public class IngestionListener {
                                 (existing, replacement) -> existing
                         ));
 
-                int matches = 0;
                 for (BankTransaction tx : transactions) {
                     String catId = predictedMap.get(tx.getDescription());
                     if (catId != null) {
@@ -112,30 +145,38 @@ public class IngestionListener {
                 log.info("IA Categorizou {} de {} transações.", matches, transactions.size());
             }
         } catch (Exception e) {
-            log.error("Erro na integração com IA: {}", e.getMessage());
+            log.error("Erro na integração com IA (Report Service): {}", e.getMessage());
         }
+        return matches;
     }
 
-    private void persistTransactionsBatch(List<BankTransaction> transactions, String profileId, String bankAccountId, String fallbackCategoryId) {
+    private void persistTransactionsBatch(List<BankTransaction> transactions, String profileId, String bankAccountId,
+                                          String fallbackIncomeId, String fallbackExpenseId) {
+
         List<CreateTransactionRequest> dtos = transactions.stream()
-                .map(tx -> toCreateRequest(tx, profileId, bankAccountId, fallbackCategoryId))
+                .map(tx -> toCreateRequest(tx, profileId, bankAccountId, fallbackIncomeId, fallbackExpenseId))
                 .toList();
 
         try {
             coreServiceClient.createTransactionsBatch(dtos);
-            log.info("SUCESSO FINAL! {} transações enviadas ao Core.", dtos.size());
         } catch (Exception e) {
-            log.error("Erro ao salvar no Core Service.", e);
+            log.error("Erro ao salvar transações no Core Service.", e);
             throw e;
         }
     }
 
-    private CreateTransactionRequest toCreateRequest(BankTransaction tx, String profileId, String bankAccountId, String fallbackCategoryId) {
+    private CreateTransactionRequest toCreateRequest(BankTransaction tx, String profileId, String bankAccountId,
+                                                     String fallbackIncomeId, String fallbackExpenseId) {
+
         boolean isExpense = tx.getAmount().compareTo(BigDecimal.ZERO) < 0;
         TransactionType type = isExpense ? TransactionType.EXPENSE : TransactionType.INCOME;
         BigDecimal amountAbs = tx.getAmount().abs();
 
-        String finalCategoryId = tx.getCategoryId() != null ? tx.getCategoryId() : fallbackCategoryId;
+        String finalCategoryId = tx.getCategoryId();
+
+        if (finalCategoryId == null) {
+            finalCategoryId = isExpense ? fallbackExpenseId : fallbackIncomeId;
+        }
 
         return new CreateTransactionRequest(
                 UUID.fromString(profileId),
