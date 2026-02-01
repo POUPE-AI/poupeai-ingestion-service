@@ -10,6 +10,7 @@ import io.github.poupeai.ingestion.client.dto.UpdateIngestionJobRequest;
 import io.github.poupeai.ingestion.domain.event.IngestionEvent;
 import io.github.poupeai.ingestion.domain.model.BankTransaction;
 import io.github.poupeai.ingestion.dto.CategoryDTO;
+import io.github.poupeai.ingestion.service.NotificationProducer;
 import io.github.poupeai.ingestion.service.StorageService;
 import io.github.poupeai.ingestion.service.parser.OfxParserService;
 import lombok.RequiredArgsConstructor;
@@ -34,6 +35,7 @@ public class IngestionListener {
     private final OfxParserService ofxParserService;
     private final CoreServiceClient coreServiceClient;
     private final ReportServiceClient reportServiceClient;
+    private final NotificationProducer notificationProducer;
 
     @RabbitListener(queues = "${app.rabbitmq.queue.ingestion}")
     public void handleIngestionEvent(IngestionEvent event) {
@@ -46,10 +48,18 @@ public class IngestionListener {
 
         String jobId = event.payload().jobId();
         String fileKey = event.payload().fileKey();
-        String profileId = event.payload().profileId();
-        String bankAccountId = event.payload().bankAccountId();
+
+        String profileId = event.payload().profile().id();
+        String profileName = event.payload().profile().name();
+        String profileEmail = event.payload().profile().email();
+
+        String bankAccountId = event.payload().bankAccount().id();
+        String accountName = event.payload().bankAccount().name();
+
         String fallbackIncomeId = event.payload().fallbackIncomeCategoryId();
         String fallbackExpenseId = event.payload().fallbackExpenseCategoryId();
+
+        String fileName = fileKey.contains("/") ? fileKey.substring(fileKey.lastIndexOf('/') + 1) : fileKey;
 
         log.info("Iniciando processamento. Arquivo: {}", fileKey);
 
@@ -75,6 +85,11 @@ public class IngestionListener {
                         }
                         """;
                     updateJobStatus(jobId, "COMPLETED", emptySummary, null);
+
+                    notificationProducer.sendError(
+                            profileId, profileEmail, profileName, fileName, accountName,
+                            "NO_TRANSACTIONS", "Nenhuma transação encontrada no arquivo."
+                    );
                     return;
                 }
 
@@ -98,11 +113,18 @@ public class IngestionListener {
 
                 updateJobStatus(jobId, "COMPLETED", summaryJson, null);
                 log.info("Job {} finalizado com sucesso.", jobId);
+
+                notificationProducer.sendSuccess(profileId, profileEmail, profileName, fileName, accountName);
             }
 
         } catch (Exception e) {
             log.error("Erro fatal ao processar Job {}", jobId, e);
             updateJobStatus(jobId, "FAILED", null, "Erro interno: " + e.getMessage());
+
+            notificationProducer.sendError(
+                    profileId, profileEmail, profileName, fileName, accountName,
+                    "INTERNAL_ERROR", "Erro ao processar arquivo: " + e.getMessage()
+            );
         }
     }
 
