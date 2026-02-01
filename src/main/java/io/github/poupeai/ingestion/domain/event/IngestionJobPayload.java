@@ -5,5 +5,6 @@ public record IngestionJobPayload(
         String fileKey,
         String profileId,
         String bankAccountId,
-        String fallbackCategoryId
+        String fallbackIncomeCategoryId,
+        String fallbackExpenseCategoryId
 ) { }
