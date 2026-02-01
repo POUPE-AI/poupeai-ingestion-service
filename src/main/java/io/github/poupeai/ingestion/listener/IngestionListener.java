@@ -4,6 +4,8 @@ import io.github.poupeai.ingestion.client.CoreServiceClient;
 import io.github.poupeai.ingestion.client.ReportServiceClient;
 import io.github.poupeai.ingestion.client.dto.CategorizationRequest;
 import io.github.poupeai.ingestion.client.dto.CategorizationResponse;
+import io.github.poupeai.ingestion.client.dto.CreateTransactionRequest;
+import io.github.poupeai.ingestion.client.dto.TransactionType;
 import io.github.poupeai.ingestion.domain.event.IngestionEvent;
 import io.github.poupeai.ingestion.domain.model.BankTransaction;
 import io.github.poupeai.ingestion.dto.CategoryDTO;
@@ -15,9 +17,11 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -41,40 +45,45 @@ public class IngestionListener {
 
         String fileKey = event.payload().fileKey();
         String profileId = event.payload().profileId();
+        String bankAccountId = event.payload().bankAccountId();
 
         log.info("Iniciando processamento. Arquivo: {} | Profile: {}", fileKey, profileId);
 
         try (InputStream inputStream = storageService.downloadFile(fileKey)) {
 
             List<BankTransaction> transactions = ofxParserService.parse(inputStream);
-            log.info("Passo 1: OFX Parseado. {} transações.", transactions.size());
+            log.info("Passo 1: OFX Parseado. {} transações encontradas.", transactions.size());
 
-            List<CategoryDTO> userCategories = Collections.emptyList();
-            try {
-                userCategories = coreServiceClient.getCategories(profileId);
-                log.info("Passo 2: Categorias recuperadas: {}", userCategories.size());
-            } catch (Exception e) {
-                log.error("Falha ao buscar categorias. A categorização IA será prejudicada.", e);
+            if (transactions.isEmpty()) {
+                log.warn("Nenhuma transação válida encontrada no arquivo.");
+                return;
             }
 
-            if (!userCategories.isEmpty() && !transactions.isEmpty()) {
+            List<CategoryDTO> userCategories = fetchCategoriesSafely(profileId);
+
+            if (!userCategories.isEmpty()) {
                 applyCategorization(transactions, userCategories);
-            } else {
-                log.warn("Pulando etapa de IA (Categorias ou Transações vazias).");
             }
 
-            transactions.forEach(t -> log.info("TX: {} | Valor: {} | CatID: {} | Desc: {}",
-                    t.getDate().toLocalDate(), t.getAmount(), t.getCategoryId(), t.getDescription()));
-
-            // TODO: Próxima issue -> Persistir (POST /transactions) no Core
+            log.info("Passo 4: Enviando {} transações para persistência no Core...", transactions.size());
+            persistTransactionsBatch(transactions, profileId, bankAccountId);
 
         } catch (Exception e) {
-            log.error("Erro ao processar ingestão", e);
+            log.error("Erro fatal ao processar ingestão", e);
+        }
+    }
+
+    private List<CategoryDTO> fetchCategoriesSafely(String profileId) {
+        try {
+            return coreServiceClient.getCategories(profileId);
+        } catch (Exception e) {
+            log.error("Falha não-bloqueante ao buscar categorias: {}", e.getMessage());
+            return Collections.emptyList();
         }
     }
 
     private void applyCategorization(List<BankTransaction> transactions, List<CategoryDTO> userCategories) {
-        log.info("Passo 3: Solicitando predição de categorias para IA (Timeout 60s)...");
+        log.info("Passo 3: Solicitando predição de categorias para IA...");
         try {
             List<String> descriptions = transactions.stream()
                     .map(BankTransaction::getDescription)
@@ -104,12 +113,43 @@ public class IngestionListener {
                     }
                 }
                 log.info("IA Categorizou {} de {} transações.", matches, transactions.size());
-            } else {
-                log.warn("IA retornou resposta válida, mas lista de categorizações veio vazia.");
             }
-
         } catch (Exception e) {
             log.error("Erro na integração com IA (Report Service): {}", e.getMessage());
         }
+    }
+
+    private void persistTransactionsBatch(List<BankTransaction> transactions, String profileId, String bankAccountId) {
+        List<CreateTransactionRequest> dtos = transactions.stream()
+                .map(tx -> toCreateRequest(tx, profileId, bankAccountId))
+                .toList();
+
+        try {
+            coreServiceClient.createTransactionsBatch(dtos);
+            log.info("SUCESSO FINAL! Transações salvas no Core Service.");
+        } catch (Exception e) {
+            log.error("Erro ao salvar transações no Core Service.", e);
+            throw e;
+        }
+    }
+
+    private CreateTransactionRequest toCreateRequest(BankTransaction tx, String profileId, String bankAccountId) {
+        boolean isExpense = tx.getAmount().compareTo(BigDecimal.ZERO) < 0;
+        TransactionType type = isExpense ? TransactionType.EXPENSE : TransactionType.INCOME;
+
+        BigDecimal amountAbs = tx.getAmount().abs();
+
+        UUID categoryId = tx.getCategoryId() != null ? UUID.fromString(tx.getCategoryId()) : null;
+
+        return new CreateTransactionRequest(
+                UUID.fromString(profileId),
+                UUID.fromString(bankAccountId),
+                tx.getDescription(),
+                amountAbs,
+                type,
+                tx.getDate().toLocalDate(),
+                categoryId,
+                tx.getFitId()
+        );
     }
 }
