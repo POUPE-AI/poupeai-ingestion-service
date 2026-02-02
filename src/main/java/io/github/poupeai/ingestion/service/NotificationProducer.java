@@ -16,10 +16,10 @@ public class NotificationProducer {
 
     private final RabbitTemplate rabbitTemplate;
 
-    @Value("${app.rabbitmq.notifications.exchange}")
+    @Value("${app.rabbitmq.notification.exchange}")
     private String exchange;
 
-    @Value("${app.rabbitmq.notifications.routing-key}")
+    @Value("${app.rabbitmq.notification.routing-key}")
     private String routingKey;
 
     public void sendSuccess(String userId, String email, String name, String fileName, String accountName) {
