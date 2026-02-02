@@ -7,6 +7,5 @@ public record IngestionEvent(
         OffsetDateTime timestamp,
         String triggerType,
         String eventType,
-        String recipient,
         IngestionJobPayload payload
 ) { }

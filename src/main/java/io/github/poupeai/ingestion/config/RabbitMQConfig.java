@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
@@ -29,6 +30,9 @@ public class RabbitMQConfig {
 
     @Value("${app.rabbitmq.routing-key}")
     private String routingKey;
+
+    @Value("${app.rabbitmq.notification.exchange}")
+    private String notificationExchangeName;
 
     @Bean
     @Primary
@@ -56,6 +60,11 @@ public class RabbitMQConfig {
         return BindingBuilder.bind(ingestionQueue)
                 .to(ingestionExchange)
                 .with(routingKey);
+    }
+
+    @Bean
+    public DirectExchange notificationExchange() {
+        return new DirectExchange(notificationExchangeName);
     }
 
     @Bean
