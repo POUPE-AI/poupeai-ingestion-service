@@ -33,14 +33,12 @@ jobs:
 
       - name: Build, Testes e Verificação
         id: maven-build
-
         run: mvn clean verify
 
       - name: Publicar Resumo de Cobertura no PR
         if: github.event_name == 'pull_request'
         uses: Madrapps/jacoco-report@v1.7.1
         with:
-
           paths: |
             ${{ github.workspace }}/**/target/site/jacoco/jacoco.xml
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -52,7 +50,6 @@ jobs:
   push_to_dockerhub:
     name: Push Image to Docker Hub
     needs: build-and-test
-
     if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -70,7 +67,6 @@ jobs:
         with:
           context: .
           push: true
-
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
@@ -89,20 +85,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -e
-            
-            echo "--- Login no Docker Hub ---"
             echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-            echo "--- Atualizando Infra ---"
             cd ${{ env.INFRA_DIR }}
-            
-            # Puxa a nova imagem do Docker Hub
             docker compose -f docker-compose-production.yml pull ${{ env.COMPOSE_SERVICE_NAME }}
-
-            # Recria o container do ingestion-service com a nova imagem
             docker compose -f docker-compose-production.yml up -d --force-recreate --no-deps ${{ env.COMPOSE_SERVICE_NAME }}
-
-            # Limpeza de imagens antigas
             docker image prune -f
-            
-            echo "--- Deploy finalizado com sucesso! ---"
