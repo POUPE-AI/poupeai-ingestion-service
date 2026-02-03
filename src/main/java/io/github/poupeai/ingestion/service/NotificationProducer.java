@@ -50,7 +50,6 @@ public class NotificationProducer {
 
     private void publish(NotificationEvent event) {
         try {
-            log.info("Enviando notificação: Type={} Recipient={}", event.eventType(), event.recipient().email());
             rabbitTemplate.convertAndSend(exchange, routingKey, event);
         } catch (Exception e) {
             log.error("Falha ao publicar evento de notificação", e);
