@@ -50,7 +50,7 @@ jobs:
   push_to_dockerhub:
     name: Push Image to Docker Hub
     needs: build-and-test
-    if: (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && github.event_name == 'push'
+    if: contains('["main", "develop"]', github.ref_name) && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout do código
@@ -74,7 +74,7 @@ jobs:
   deploy:
     name: Deploy to VPS (Hostinger)
     needs: push_to_dockerhub
-    if: (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && github.event_name == 'push'
+    if: contains('["main", "develop"]', github.ref_name) && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Executar Deploy via SSH
